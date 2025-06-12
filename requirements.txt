@@ -32,3 +32,4 @@ tzdata==2025.1
 google-auth
 razorpay
 django-environ
+python-dateutil
