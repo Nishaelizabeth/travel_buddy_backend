@@ -6,7 +6,8 @@ from .views import (UserRegistrationView, TravelInterestListView,
                      TripCreateView, CompatibleTripsView, JoinTripView, TripDetailsView, TripChatMessagesView,
                      UserStatsView, UserDashboardView, ConnectedBuddiesView, CancelTripView, LeaveTripView,
                      create_razorpay_order, verify_razorpay_payment, TripNotificationView, UnreadNotificationCountView,
-                     ChatNotificationView, UnreadChatNotificationCountView, RemoveTripMemberView)
+                     ChatNotificationView, UnreadChatNotificationCountView, RemoveTripMemberView,
+                     DestinationRecommendationsView)
 # Import review views from views.py instead of review_views.py
 from .views import TripReviewView, LatestReviewsView, test_review_endpoint
 # Import admin views
@@ -108,4 +109,7 @@ urlpatterns = [
     # Chat Notification endpoints
     path('chat-notifications/', ChatNotificationView.as_view(), name='chat-notifications'),
     path('chat-notifications/unread-count/', UnreadChatNotificationCountView.as_view(), name='unread-chat-notification-count'),
+    
+    # AI / OpenTripMap Destination Recommendations
+    path('ai/destination-recommendations/', DestinationRecommendationsView.as_view(), name='destination-recommendations'),
 ]

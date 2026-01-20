@@ -250,9 +250,14 @@ def register_user(request):
                         user.save(update_fields=['profile_picture'])
                         logger.info(f"Profile picture saved directly: {user.profile_picture.name}")
                 
+                # Generate tokens for automatic login
+                refresh = RefreshToken.for_user(user)
+                
                 return Response({
                     'message': 'Registration successful',
-                    'user': user_serializer.data
+                    'user': user_serializer.data,
+                    'access': str(refresh.access_token),
+                    'refresh': str(refresh)
                 }, status=status.HTTP_201_CREATED)
             except Exception as e:
                 logger.error(f"Error during user registration: {str(e)}")
@@ -312,11 +317,21 @@ def login_user(request):
     
     if user:
         refresh = RefreshToken.for_user(user)
+        
+        # Check if user has preferences set
+        has_preferences = False
+        try:
+            preferences = UserPreferences.objects.get(user=user)
+            has_preferences = bool(preferences.travel_frequency and preferences.travel_budget)
+        except UserPreferences.DoesNotExist:
+            has_preferences = False
+        
         return Response({
             'message': 'Login successful',
             'access': str(refresh.access_token),
             'refresh': str(refresh),
-            'user': UserProfileSerializer(user).data
+            'user': UserProfileSerializer(user).data,
+            'has_preferences': has_preferences
         })
     else:
         # Check if user exists with the given username/email
@@ -2360,11 +2375,11 @@ class AdminInterestListView(APIView):
     
     def get(self, request):
         interests = TravelInterest.objects.all()
-        serializer = TravelInterestSerializer(interests, many=True)
+        serializer = TravelInterestSerializer(interests, many=True, context={'request': request})
         return Response(serializer.data)
     
     def post(self, request):
-        serializer = TravelInterestSerializer(data=request.data)
+        serializer = TravelInterestSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -2384,12 +2399,12 @@ class AdminInterestDetailView(APIView):
     
     def get(self, request, pk):
         interest = self.get_object(pk)
-        serializer = TravelInterestSerializer(interest)
+        serializer = TravelInterestSerializer(interest, context={'request': request})
         return Response(serializer.data)
     
     def put(self, request, pk):
         interest = self.get_object(pk)
-        serializer = TravelInterestSerializer(interest, data=request.data, partial=True)
+        serializer = TravelInterestSerializer(interest, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
@@ -3652,3 +3667,137 @@ class RemoveTripMemberView(APIView):
             return Response({
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =====================================================
+# AI/OpenTripMap Destination Recommendations
+# =====================================================
+
+class DestinationRecommendationsView(APIView):
+    """
+    AI-powered destination recommendations using OpenTripMap API.
+    
+    GET /api/ai/destination-recommendations/
+    
+    Query Parameters:
+        - destination_id: ID of the PreferredDestination (optional)
+        - latitude: Latitude for search (required if no destination_id)
+        - longitude: Longitude for search (required if no destination_id)
+        - radius: Search radius in meters (default: 5000)
+        - limit: Max number of results (default: 10)
+    
+    Returns nearby places based on user's travel interests.
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        try:
+            from .services.open_trip_map import OpenTripMapService
+            
+            # Get query parameters
+            destination_id = request.query_params.get('destination_id')
+            latitude = request.query_params.get('latitude')
+            longitude = request.query_params.get('longitude')
+            radius = int(request.query_params.get('radius', 5000))
+            limit_str = request.query_params.get('limit', '10')
+            print(f"DEBUG: limit_str = {limit_str}, type = {type(limit_str)}")
+            limit = int(limit_str)
+            print(f"DEBUG: limit = {limit}, type = {type(limit)}")
+            
+            # Validate limit
+            if limit < 1 or limit > 50:
+                limit = 10
+            
+            # Get destination info if destination_id provided
+            destination_info = None
+            if destination_id:
+                try:
+                    destination = PreferredDestination.objects.get(id=destination_id)
+                    destination_info = {
+                        'id': destination.id,
+                        'name': destination.name,
+                        'location': destination.location
+                    }
+                except PreferredDestination.DoesNotExist:
+                    return Response({
+                        'error': 'Destination not found'
+                    }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Validate coordinates
+            if not latitude or not longitude:
+                return Response({
+                    'error': 'latitude and longitude are required query parameters'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except ValueError:
+                return Response({
+                    'error': 'latitude and longitude must be valid numbers'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get user's travel interests
+            user = request.user
+            interests = []
+            
+            # Get interests - either from destination or use popular travel interests
+            interests = []
+            
+            # If destination_id provided, get interests linked to that destination
+            if destination_id:
+                try:
+                    destination = PreferredDestination.objects.get(id=destination_id)
+                    # Get interests from DestinationTravelInterest
+                    dest_interests = DestinationTravelInterest.objects.filter(destination=destination)
+                    interests = [di.interest.name for di in list(dest_interests)]
+                except PreferredDestination.DoesNotExist:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Error getting destination interests: {e}")
+            
+            # If no interests from destination, get some popular ones
+            if not interests:
+                try:
+                    # Get all available travel interests as fallback
+                    all_interests = list(TravelInterest.objects.all()[:5])
+                    interests = [interest.name for interest in all_interests]
+                except Exception as e:
+                    logger.warning(f"Error getting travel interests: {e}")
+            
+            # If still no interests, use defaults
+            if not interests:
+                interests = ['sightseeing', 'cultural', 'nature']
+            
+            # Initialize OpenTripMap service and get recommendations
+            service = OpenTripMapService()
+            result = service.get_recommendations_for_interests(
+                latitude=latitude,
+                longitude=longitude,
+                interests=interests,
+                radius=radius,
+                limit=limit
+            )
+            
+            # Build response
+            response_data = {
+                'success': result.get('success', False),
+                'destination': destination_info,
+                'recommendations': result.get('places', []),
+                'total_count': result.get('total_count', 0),
+                'user_interests': interests,
+                'mapped_categories': result.get('mapped_categories', []),
+                'query_params': result.get('query_params', {})
+            }
+            
+            if not result.get('success'):
+                response_data['error'] = result.get('error', 'Unknown error')
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error in DestinationRecommendationsView: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

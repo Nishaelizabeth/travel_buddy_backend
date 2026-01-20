@@ -101,9 +101,20 @@ class UserProfileCompatibilitySerializer(serializers.ModelSerializer):
 
 
 class TravelInterestSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    
     class Meta:
         model = TravelInterest
-        fields = '__all__'
+        fields = ['id', 'name', 'description', 'image', 'image_url', 'created_at', 'updated_at']
+    
+    def get_image_url(self, obj):
+        if obj.image and hasattr(obj.image, 'url'):
+            request = self.context.get('request')
+            if request is not None:
+                return request.build_absolute_uri(obj.image.url)
+            # Fallback to constructing the URL manually
+            return f"http://localhost:8000{obj.image.url}"
+        return None
 
 class PreferredDestinationSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
